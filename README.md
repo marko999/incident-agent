@@ -2,6 +2,22 @@
 
 An AI-powered incident response agent that automatically analyzes production alerts, finds root causes, fixes code, and creates PRs.
 
+## Roadmap
+
+### Friday March 6 — Pre-hackathon prep
+
+- [ ] Smoke test full end-to-end flow (port-forward → trigger incident → alert fires → agent creates PR)
+- [ ] Repeat with all 4 chaos scenarios, verify reset cleans up properly
+- [ ] Decide credential strategy: how agent gets `KUBECONFIG`, `GITHUB_TOKEN`, `ANTHROPIC_API_KEY` (env vars vs k8s secret)
+- [ ] Build proper Python agent using `agent-framework-anthropic` with kubectl/gh/az as callable tools
+- [ ] Wire webhook to auto-trigger the agent (AlertManager fires → agent runs automatically)
+- [ ] Write presenter demo script with exact steps and expected outputs
+
+### Saturday March 7 — Hackathon/Workshop
+
+- [ ] Live demo: trigger incident, agent autonomously investigates and creates PR
+- [ ] Workshop participants run through the flow themselves
+
 ## Prerequisites
 
 - `kubectl`
