@@ -1,0 +1,8 @@
+# Local config with secrets
+config.env
+
+# Python virtualenv
+.venv/
+
+# Claude session files
+.claude/
