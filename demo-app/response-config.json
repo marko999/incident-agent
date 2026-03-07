@@ -1,0 +1,6 @@
+{
+  "itemCount": 100,
+  "maxPageSize": 50,
+  "defaultSort": "name",
+  "enableCache": false
+}

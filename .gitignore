@@ -6,3 +6,6 @@ config.env
 
 # Claude session files
 .claude/
+
+# Python cache
+__pycache__/

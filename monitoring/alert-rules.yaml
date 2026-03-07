@@ -61,6 +61,30 @@ spec:
             summary: "High latency detected"
             description: "p95 latency is {{ $value }}s"
 
+        # Low replica count (scale-down / low availability)
+        - alert: PodReplicaCountLow
+          expr: |
+            kube_deployment_status_replicas_available{namespace="demo-app", deployment="demo-app"} < 2
+          for: 30s
+          labels:
+            severity: critical
+            service: demo-app
+          annotations:
+            summary: "Low replica count"
+            description: "Deployment demo-app has {{ $value }} available replicas, expected at least 2"
+
+        # Container OOM killed (memory limit exceeded)
+        - alert: ContainerOOMKilled
+          expr: |
+            kube_pod_container_status_last_terminated_reason{namespace="demo-app", reason="OOMKilled"} == 1
+          for: 0s
+          labels:
+            severity: critical
+            service: demo-app
+          annotations:
+            summary: "Container OOM killed"
+            description: "Container {{ $labels.container }} in pod {{ $labels.pod }} was killed due to out-of-memory"
+
         # Pod restarts
         - alert: PodCrashLooping
           expr: |

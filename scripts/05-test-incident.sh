@@ -1,74 +1,165 @@
 #!/bin/bash
 set -e
 
-echo "=== Incident Test Scripts ==="
-echo ""
-echo "First, port-forward the demo app:"
-echo "  kubectl port-forward -n demo-app svc/demo-app 8080:80"
-echo ""
+source "$(dirname "$0")/../config.env"
 
 APP_URL="${APP_URL:-http://localhost:8080}"
+KUBECTL="kubectl --kubeconfig $HOME/.kube/aks-incident-demo.config"
 
 case "${1:-menu}" in
+
+  # ==================================================================
+  # CODE SCENARIOS — enable a buggy feature, then generate traffic
+  # ==================================================================
+
   memory-leak)
-    echo "Triggering memory leak..."
-    curl -s -X POST "$APP_URL/chaos/memory-leak" | jq .
+    # Bug: requestLog array grows without bound, no eviction
+    echo "Enabling request logging feature (has memory leak bug)..."
+    curl -s -X POST "$APP_URL/features/enable/requestLogging" | jq .
     echo ""
-    echo "Memory leak active. Watch with:"
-    echo "  curl -s $APP_URL/chaos/status | jq .memoryUsage"
-    echo "Alert should fire in ~30s (HighMemoryUsage)"
+    echo "Generating sustained traffic to grow the request log..."
+    for i in $(seq 1 500); do
+      curl -s -o /dev/null "$APP_URL/api/data" &
+      # Throttle to avoid overwhelming the connection pool
+      [ $((i % 50)) -eq 0 ] && wait
+    done
+    wait
+    echo ""
+    echo "Traffic sent. Memory is growing. Alert should fire in ~30-60s (HighMemoryUsage)"
+    echo "Watch with: curl -s $APP_URL/features | jq .memoryUsage"
     ;;
 
   cpu-spike)
-    echo "Triggering CPU spike..."
-    curl -s -X POST "$APP_URL/chaos/cpu-spike" | jq .
+    # Bug: catastrophic regex backtracking in search validation
+    echo "Enabling search feature (has regex backtracking bug)..."
+    curl -s -X POST "$APP_URL/features/enable/searchEnabled" | jq .
     echo ""
-    echo "CPU spike active. Alert should fire in ~30s (HighCPUUsage)"
+    echo "Sending pathological search queries..."
+    # This input causes catastrophic backtracking: many 'a's followed by '!'
+    EVIL_QUERY="aaaaaaaaaaaaaaaaaaaaaaaaaaaa!"
+    for i in $(seq 1 20); do
+      curl -s -o /dev/null "$APP_URL/api/search?q=$EVIL_QUERY" &
+    done
+    wait
+    echo ""
+    echo "CPU is burning on regex backtracking. Alert should fire in ~30s (HighCPUUsage)"
     ;;
 
   error-rate)
-    echo "Setting error rate to 50%..."
-    curl -s -X POST "$APP_URL/chaos/error-rate" -H 'Content-Type: application/json' -d '{"rate": 50}' | jq .
+    # Bug: enrichUser crashes with TypeError on unknown user IDs (no null check)
+    echo "Enabling user enrichment feature (has null reference bug)..."
+    curl -s -X POST "$APP_URL/features/enable/userEnrichment" | jq .
     echo ""
-    echo "Now generating traffic to trigger the alert..."
-    for i in $(seq 1 100); do
-      curl -s -o /dev/null "$APP_URL/api/data" &
+    echo "Sending requests for non-existent user IDs..."
+    for i in $(seq 1 200); do
+      # User IDs 99, 100, etc. don't exist in the profiles map
+      curl -s -o /dev/null "$APP_URL/api/users?id=$((i + 98))" &
+      [ $((i % 50)) -eq 0 ] && wait
     done
     wait
-    echo "Traffic sent. Alert should fire in ~30s (HighErrorRate)"
+    echo ""
+    echo "Errors generated. Alert should fire in ~30s (HighErrorRate)"
     ;;
 
   slow-responses)
-    echo "Enabling slow responses (5s delay)..."
-    curl -s -X POST "$APP_URL/chaos/slow-responses" -H 'Content-Type: application/json' -d '{"delayMs": 5000}' | jq .
+    # Bug: fs.readFileSync on every request blocks the event loop
+    echo "Enabling config-driven responses (has sync I/O bug)..."
+    curl -s -X POST "$APP_URL/features/enable/configDriven" | jq .
     echo ""
-    echo "Now generating traffic to trigger the alert..."
-    for i in $(seq 1 20); do
+    echo "Sending concurrent requests to saturate the event loop..."
+    for i in $(seq 1 50); do
       curl -s -o /dev/null "$APP_URL/api/data" &
     done
     wait
-    echo "Traffic sent. Alert should fire in ~30s (HighLatency)"
+    echo ""
+    echo "Event loop is blocked by sync reads. Alert should fire in ~30s (HighLatency)"
     ;;
 
+  # ==================================================================
+  # INFRA SCENARIOS — apply misconfigurations via kubectl
+  # ==================================================================
+
+  scale-down)
+    # Bug: replica count too low for the service's availability requirements
+    echo "Scaling demo-app down to 1 replica..."
+    $KUBECTL scale deployment demo-app -n demo-app --replicas=1
+    echo ""
+    echo "Alert should fire in ~30s (PodReplicaCountLow)"
+    echo "Watch: $KUBECTL get pods -n demo-app -w"
+    ;;
+
+  resource-squeeze)
+    # Bug: memory limit in deployment too low for the workload
+    echo "Patching memory limit to 100Mi (too low for traffic)..."
+    $KUBECTL patch deployment demo-app -n demo-app --type=json \
+      -p='[{"op":"replace","path":"/spec/template/spec/containers/0/resources/limits/memory","value":"100Mi"}]'
+    echo ""
+    echo "Pods will OOM under normal load. Alert should fire in ~60s (ContainerOOMKilled)"
+    echo "Watch: $KUBECTL get pods -n demo-app -w"
+    ;;
+
+  crash-loop)
+    # Bug: bad NODE_OPTIONS env var causes the process to crash on startup
+    echo "Injecting bad NODE_OPTIONS (10MB heap = instant crash)..."
+    $KUBECTL set env deployment/demo-app -n demo-app NODE_OPTIONS="--max-old-space-size=10"
+    echo ""
+    echo "Pods will crash loop. Alert should fire in ~60s (PodCrashLooping)"
+    echo "Watch: $KUBECTL get pods -n demo-app -w"
+    ;;
+
+  # ==================================================================
+  # RESET & STATUS
+  # ==================================================================
+
   reset)
-    echo "Resetting all chaos..."
-    curl -s -X POST "$APP_URL/chaos/reset" | jq .
+    echo "Resetting all features..."
+    curl -s -X POST "$APP_URL/features/disable/requestLogging" | jq . || echo "(app may be down)"
+    curl -s -X POST "$APP_URL/features/disable/searchEnabled" | jq . || echo "(skipped)"
+    curl -s -X POST "$APP_URL/features/disable/userEnrichment" | jq . || echo "(skipped)"
+    curl -s -X POST "$APP_URL/features/disable/configDriven" | jq . || echo "(skipped)"
+
+    echo ""
+    echo "Resetting infra..."
+    $KUBECTL scale deployment demo-app -n demo-app --replicas=2
+
+    $KUBECTL patch deployment demo-app -n demo-app --type=json \
+      -p='[{"op":"replace","path":"/spec/template/spec/containers/0/resources/limits/memory","value":"512Mi"}]' \
+      2>/dev/null || true
+
+    $KUBECTL set env deployment/demo-app -n demo-app NODE_OPTIONS- 2>/dev/null || true
+
+    echo ""
+    echo "Waiting for pods to stabilize..."
+    $KUBECTL rollout status deployment/demo-app -n demo-app --timeout=60s
+    echo "Done."
     ;;
 
   status)
-    echo "Current chaos status:"
-    curl -s "$APP_URL/chaos/status" | jq .
+    echo "=== Feature flags ==="
+    curl -s "$APP_URL/features" | jq . || echo "(app unreachable)"
+    echo ""
+    echo "=== Pod status ==="
+    $KUBECTL get pods -n demo-app
+    echo ""
+    echo "=== Resource usage ==="
+    $KUBECTL top pods -n demo-app 2>/dev/null || echo "(metrics not available yet)"
     ;;
 
   *)
     echo "Usage: $0 <scenario>"
     echo ""
-    echo "Scenarios:"
-    echo "  memory-leak     - Start allocating 10MB every 500ms"
-    echo "  cpu-spike       - Burn CPU in tight loop"
-    echo "  error-rate      - Return 500 for 50% of requests"
-    echo "  slow-responses  - Add 5s delay to all responses"
-    echo "  reset           - Stop all chaos"
-    echo "  status          - Show current chaos state"
+    echo "Code scenarios (enable buggy feature + generate traffic):"
+    echo "  memory-leak      - Unbounded request log         → HighMemoryUsage"
+    echo "  cpu-spike        - Catastrophic regex backtrack   → HighCPUUsage"
+    echo "  error-rate       - Null ref on unknown user ID    → HighErrorRate"
+    echo "  slow-responses   - Sync file read on every req    → HighLatency"
+    echo ""
+    echo "Infra scenarios (apply misconfiguration via kubectl):"
+    echo "  scale-down       - Set replicas to 1              → PodReplicaCountLow"
+    echo "  resource-squeeze - Set memory limit to 100Mi      → ContainerOOMKilled"
+    echo "  crash-loop       - Bad NODE_OPTIONS (10MB heap)   → PodCrashLooping"
+    echo ""
+    echo "  reset            - Undo all features + infra"
+    echo "  status           - Show current state"
     ;;
 esac

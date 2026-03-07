@@ -1,3 +1,5 @@
+const fs = require('fs');
+const path = require('path');
 const express = require('express');
 const promClient = require('prom-client');
 
@@ -21,57 +23,105 @@ const httpDuration = new promClient.Histogram({
 
 promClient.collectDefaultMetrics();
 
-// ---- Chaos State ----
+// ---- Feature Flags ----
+// These simulate feature toggles. Each enables a "feature" that has a real bug.
+// In production you'd use LaunchDarkly, Unleash, etc.
 
-const chaos = {
-  memoryLeak: false,
-  cpuSpike: false,
-  slowResponses: false,
-  errorRate: 0,        // 0-100, percentage of requests that return 500
-  slowDelayMs: 5000,
+const features = {
+  requestLogging: false,   // enables request logging (has memory leak bug)
+  searchEnabled: false,    // enables /api/search (has CPU bug)
+  userEnrichment: false,   // enables enriched /api/users (has null ref bug)
+  configDriven: false,     // enables config-based responses (has sync I/O bug)
 };
 
-// Memory leak storage
-const leakedBuffers = [];
-let cpuInterval = null;
+// ---- Feature: Request Logging ----
+// Bug: logs are stored in an unbounded in-memory array. Under sustained traffic
+// this grows forever and eventually causes an OOM. There is no eviction, no max
+// size, no rotation — every single request is kept in memory indefinitely.
 
-// ---- Middleware: metrics + chaos injection ----
+const requestLog = [];
+
+function logRequest(req) {
+  if (!features.requestLogging) return;
+  requestLog.push({
+    timestamp: new Date().toISOString(),
+    method: req.method,
+    path: req.path,
+    headers: { ...req.headers },
+    query: { ...req.query },
+    body: req.body,
+  });
+  // BUG: requestLog grows without bound — no eviction, no max size
+}
+
+// ---- Feature: Search ----
+// Bug: the input validation regex has catastrophic backtracking. When a user
+// submits a search query like "aaaaaaaaaaaaaaaaaaa!" the regex engine enters
+// exponential backtracking and burns CPU for seconds or more.
+
+function validateSearchQuery(query) {
+  // This regex is meant to allow alphanumeric strings with optional separators.
+  // BUG: nested quantifiers cause catastrophic backtracking on non-matching input
+  const pattern = /^([a-zA-Z0-9]+\s?)+$/;
+  return pattern.test(query);
+}
+
+// ---- Feature: User Enrichment ----
+// Bug: the enrichment lookup doesn't handle missing users. When a request comes
+// in for a user ID that doesn't exist in the profiles map, it tries to access
+// a property on undefined and throws a TypeError.
+
+const userProfiles = {
+  1: { bio: 'Loves hiking', avatar: '/img/alice.png', settings: { theme: 'dark' } },
+  2: { bio: 'Backend developer', avatar: '/img/bob.png', settings: { theme: 'light' } },
+  3: { bio: 'DevOps engineer', avatar: '/img/charlie.png', settings: { theme: 'auto' } },
+};
+
+const users = [
+  { id: 1, name: 'Alice', role: 'admin' },
+  { id: 2, name: 'Bob', role: 'user' },
+  { id: 3, name: 'Charlie', role: 'user' },
+];
+
+function enrichUser(user) {
+  const profile = userProfiles[user.id];
+  // BUG: if profile is undefined (user ID not in map), this throws TypeError
+  return {
+    ...user,
+    bio: profile.bio,
+    avatar: profile.avatar,
+    theme: profile.settings.theme,
+  };
+}
+
+// ---- Feature: Config-Driven Responses ----
+// Bug: reads a config file from disk synchronously on every single request.
+// Under concurrent load this blocks the event loop because readFileSync holds
+// the thread while waiting for I/O. Every request queues behind the last one.
+
+function getResponseConfig() {
+  if (!features.configDriven) return null;
+  // BUG: synchronous file read on every request — blocks the event loop
+  const configPath = path.join(__dirname, 'response-config.json');
+  const raw = fs.readFileSync(configPath, 'utf-8');
+  return JSON.parse(raw);
+}
+
+// ---- Metrics Middleware ----
 
 app.use((req, res, next) => {
-  // Skip metrics endpoint
   if (req.path === '/metrics') return next();
 
   const start = Date.now();
+  logRequest(req);
 
-  // Inject error rate
-  if (chaos.errorRate > 0 && Math.random() * 100 < chaos.errorRate) {
-    const duration = (Date.now() - start) / 1000;
-    httpDuration.observe({ method: req.method, path: req.path }, duration);
-    httpRequests.inc({ method: req.method, path: req.path, status: 500 });
-    return res.status(500).json({
-      error: 'Internal Server Error',
-      message: 'Something went wrong processing your request',
-    });
-  }
-
-  // Inject slow responses
-  if (chaos.slowResponses) {
-    setTimeout(() => {
-      proceed(req, res, next, start);
-    }, chaos.slowDelayMs);
-  } else {
-    proceed(req, res, next, start);
-  }
-});
-
-function proceed(req, res, next, start) {
   res.on('finish', () => {
     const duration = (Date.now() - start) / 1000;
     httpDuration.observe({ method: req.method, path: req.path }, duration);
     httpRequests.inc({ method: req.method, path: req.path, status: res.statusCode });
   });
   next();
-}
+});
 
 // ---- App Endpoints ----
 
@@ -80,8 +130,10 @@ app.get('/health', (req, res) => {
 });
 
 app.get('/api/data', (req, res) => {
-  // Simulate some work
-  const items = Array.from({ length: 100 }, (_, i) => ({
+  const config = getResponseConfig();
+  const count = config?.itemCount || 100;
+
+  const items = Array.from({ length: count }, (_, i) => ({
     id: i,
     name: `Item ${i}`,
     value: Math.random(),
@@ -90,78 +142,75 @@ app.get('/api/data', (req, res) => {
 });
 
 app.get('/api/users', (req, res) => {
-  res.json({
-    users: [
-      { id: 1, name: 'Alice', role: 'admin' },
-      { id: 2, name: 'Bob', role: 'user' },
-      { id: 3, name: 'Charlie', role: 'user' },
-    ],
-  });
-});
+  if (features.userEnrichment) {
+    // When enrichment is enabled, enrich all users — including any request
+    // for a user ID that doesn't exist in the profiles map
+    const requestedId = req.query.id ? parseInt(req.query.id) : null;
 
-// ---- Chaos Endpoints ----
-
-app.post('/chaos/memory-leak', (req, res) => {
-  chaos.memoryLeak = true;
-  // Allocate 10MB every 500ms
-  const interval = setInterval(() => {
-    if (!chaos.memoryLeak) {
-      clearInterval(interval);
-      return;
+    if (requestedId !== null) {
+      const user = users.find(u => u.id === requestedId) || { id: requestedId, name: 'Unknown', role: 'guest' };
+      const enriched = enrichUser(user);
+      return res.json({ user: enriched });
     }
-    leakedBuffers.push(Buffer.alloc(10 * 1024 * 1024)); // 10MB
-  }, 500);
-  res.json({ status: 'Memory leak started', interval: '10MB every 500ms' });
-});
 
-app.post('/chaos/cpu-spike', (req, res) => {
-  chaos.cpuSpike = true;
-  // Burn CPU in a tight loop
-  cpuInterval = setInterval(() => {
-    if (!chaos.cpuSpike) return;
-    const end = Date.now() + 200; // 200ms of burn per tick
-    while (Date.now() < end) {
-      Math.random() * Math.random();
-    }
-  }, 250);
-  res.json({ status: 'CPU spike started' });
-});
-
-app.post('/chaos/slow-responses', (req, res) => {
-  const delayMs = req.body?.delayMs || 5000;
-  chaos.slowResponses = true;
-  chaos.slowDelayMs = delayMs;
-  res.json({ status: 'Slow responses enabled', delayMs });
-});
-
-app.post('/chaos/error-rate', (req, res) => {
-  const rate = req.body?.rate || 50;
-  chaos.errorRate = Math.min(100, Math.max(0, rate));
-  res.json({ status: 'Error rate set', rate: chaos.errorRate });
-});
-
-app.post('/chaos/reset', (req, res) => {
-  chaos.memoryLeak = false;
-  chaos.cpuSpike = false;
-  chaos.slowResponses = false;
-  chaos.errorRate = 0;
-  leakedBuffers.length = 0;
-  if (cpuInterval) {
-    clearInterval(cpuInterval);
-    cpuInterval = null;
+    const enrichedUsers = users.map(u => enrichUser(u));
+    return res.json({ users: enrichedUsers });
   }
-  // Force GC if available
-  if (global.gc) global.gc();
-  res.json({ status: 'All chaos stopped' });
+
+  res.json({ users });
 });
 
-app.get('/chaos/status', (req, res) => {
+app.get('/api/search', (req, res) => {
+  if (!features.searchEnabled) {
+    return res.status(404).json({ error: 'Search is not enabled' });
+  }
+
+  const query = req.query.q || '';
+
+  if (!validateSearchQuery(query)) {
+    return res.status(400).json({ error: 'Invalid search query' });
+  }
+
+  // Simple mock search
+  const results = users.filter(u =>
+    u.name.toLowerCase().includes(query.toLowerCase())
+  );
+  res.json({ query, results, count: results.length });
+});
+
+// ---- Feature Flag Endpoints ----
+
+app.post('/features/enable/:feature', (req, res) => {
+  const feature = req.params.feature;
+  if (!(feature in features)) {
+    return res.status(400).json({ error: `Unknown feature: ${feature}` });
+  }
+  features[feature] = true;
+  console.log(`[FEATURE] Enabled: ${feature}`);
+  res.json({ feature, enabled: true });
+});
+
+app.post('/features/disable/:feature', (req, res) => {
+  const feature = req.params.feature;
+  if (!(feature in features)) {
+    return res.status(400).json({ error: `Unknown feature: ${feature}` });
+  }
+  features[feature] = false;
+
+  // Clean up side effects
+  if (feature === 'requestLogging') {
+    requestLog.length = 0;
+    if (global.gc) global.gc();
+  }
+
+  console.log(`[FEATURE] Disabled: ${feature}`);
+  res.json({ feature, enabled: false });
+});
+
+app.get('/features', (req, res) => {
   res.json({
-    memoryLeak: chaos.memoryLeak,
-    cpuSpike: chaos.cpuSpike,
-    slowResponses: chaos.slowResponses,
-    errorRate: chaos.errorRate,
-    leakedMB: leakedBuffers.length * 10,
+    features,
+    requestLogSize: requestLog.length,
     memoryUsage: process.memoryUsage(),
   });
 });
