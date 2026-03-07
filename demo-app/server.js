@@ -8,6 +8,7 @@ const app = express();
 app.use(express.json());
 
 const REDIS_URL = process.env.REDIS_URL || 'redis://redis.demo-app.svc.cluster.local:6379';
+const redis = new Redis(REDIS_URL);
 
 const httpRequests = new promClient.Counter({
   name: 'http_requests_total',
@@ -68,9 +69,9 @@ function enrichUser(user) {
   const profile = userProfiles[user.id];
   return {
     ...user,
-    bio: profile.bio,
-    avatar: profile.avatar,
-    theme: profile.settings.theme,
+    bio: profile?.bio,
+    avatar: profile?.avatar,
+    theme: profile?.settings?.theme,
   };
 }
 
@@ -82,38 +83,32 @@ function getResponseConfig() {
 }
 
 async function getCachedData(key) {
-  const client = new Redis(REDIS_URL);
-  const cached = await client.get(key);
+  const cached = await redis.get(key);
   if (cached) return JSON.parse(cached);
   return null;
 }
 
 async function setCachedData(key, data, ttl) {
-  const client = new Redis(REDIS_URL);
-  await client.set(key, JSON.stringify(data), 'EX', ttl);
+  await redis.set(key, JSON.stringify(data), 'EX', ttl);
 }
 
 async function getActiveSessions() {
-  const client = new Redis(REDIS_URL);
-  const keys = await client.keys('session:*');
+  const keys = await redis.keys('session:*');
   const sessions = [];
   for (const key of keys) {
-    const data = await client.get(key);
+    const data = await redis.get(key);
     if (data) sessions.push(JSON.parse(data));
   }
-  await client.quit();
   return sessions;
 }
 
 async function createSession(userId) {
-  const client = new Redis(REDIS_URL);
   const sessionId = `session:${userId}:${Date.now()}`;
-  await client.set(sessionId, JSON.stringify({
+  await redis.set(sessionId, JSON.stringify({
     userId,
     createdAt: new Date().toISOString(),
     lastActive: new Date().toISOString(),
   }), 'EX', 3600);
-  await client.quit();
   return sessionId;
 }
 
