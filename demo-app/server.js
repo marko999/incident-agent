@@ -66,6 +66,16 @@ const users = [
 
 function enrichUser(user) {
   const profile = userProfiles[user.id];
+
+  if (!profile) {
+    return {
+      ...user,
+      bio: null,
+      avatar: null,
+      theme: null,
+    };
+  }
+
   return {
     ...user,
     bio: profile.bio,
