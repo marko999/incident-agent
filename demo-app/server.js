@@ -6,8 +6,6 @@ const promClient = require('prom-client');
 const app = express();
 app.use(express.json());
 
-// ---- Prometheus Metrics ----
-
 const httpRequests = new promClient.Counter({
   name: 'http_requests_total',
   help: 'Total HTTP requests',
@@ -23,21 +21,12 @@ const httpDuration = new promClient.Histogram({
 
 promClient.collectDefaultMetrics();
 
-// ---- Feature Flags ----
-// These simulate feature toggles. Each enables a "feature" that has a real bug.
-// In production you'd use LaunchDarkly, Unleash, etc.
-
 const features = {
-  requestLogging: false,   // enables request logging (has memory leak bug)
-  searchEnabled: false,    // enables /api/search (has CPU bug)
-  userEnrichment: false,   // enables enriched /api/users (has null ref bug)
-  configDriven: false,     // enables config-based responses (has sync I/O bug)
+  requestLogging: false,
+  searchEnabled: false,
+  userEnrichment: false,
+  configDriven: false,
 };
-
-// ---- Feature: Request Logging ----
-// Bug: logs are stored in an unbounded in-memory array. Under sustained traffic
-// this grows forever and eventually causes an OOM. There is no eviction, no max
-// size, no rotation — every single request is kept in memory indefinitely.
 
 const requestLog = [];
 
@@ -51,25 +40,12 @@ function logRequest(req) {
     query: { ...req.query },
     body: req.body,
   });
-  // BUG: requestLog grows without bound — no eviction, no max size
 }
 
-// ---- Feature: Search ----
-// Bug: the input validation regex has catastrophic backtracking. When a user
-// submits a search query like "aaaaaaaaaaaaaaaaaaa!" the regex engine enters
-// exponential backtracking and burns CPU for seconds or more.
-
 function validateSearchQuery(query) {
-  // This regex is meant to allow alphanumeric strings with optional separators.
-  // BUG: nested quantifiers cause catastrophic backtracking on non-matching input
   const pattern = /^([a-zA-Z0-9]+\s?)+$/;
   return pattern.test(query);
 }
-
-// ---- Feature: User Enrichment ----
-// Bug: the enrichment lookup doesn't handle missing users. When a request comes
-// in for a user ID that doesn't exist in the profiles map, it tries to access
-// a property on undefined and throws a TypeError.
 
 const userProfiles = {
   1: { bio: 'Loves hiking', avatar: '/img/alice.png', settings: { theme: 'dark' } },
@@ -85,7 +61,6 @@ const users = [
 
 function enrichUser(user) {
   const profile = userProfiles[user.id];
-  // BUG: if profile is undefined (user ID not in map), this throws TypeError
   return {
     ...user,
     bio: profile.bio,
@@ -94,20 +69,12 @@ function enrichUser(user) {
   };
 }
 
-// ---- Feature: Config-Driven Responses ----
-// Bug: reads a config file from disk synchronously on every single request.
-// Under concurrent load this blocks the event loop because readFileSync holds
-// the thread while waiting for I/O. Every request queues behind the last one.
-
 function getResponseConfig() {
   if (!features.configDriven) return null;
-  // BUG: synchronous file read on every request — blocks the event loop
   const configPath = path.join(__dirname, 'response-config.json');
   const raw = fs.readFileSync(configPath, 'utf-8');
   return JSON.parse(raw);
 }
-
-// ---- Metrics Middleware ----
 
 app.use((req, res, next) => {
   if (req.path === '/metrics') return next();
@@ -122,8 +89,6 @@ app.use((req, res, next) => {
   });
   next();
 });
-
-// ---- App Endpoints ----
 
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', uptime: process.uptime() });
@@ -143,8 +108,6 @@ app.get('/api/data', (req, res) => {
 
 app.get('/api/users', (req, res) => {
   if (features.userEnrichment) {
-    // When enrichment is enabled, enrich all users — including any request
-    // for a user ID that doesn't exist in the profiles map
     const requestedId = req.query.id ? parseInt(req.query.id) : null;
 
     if (requestedId !== null) {
@@ -171,14 +134,11 @@ app.get('/api/search', (req, res) => {
     return res.status(400).json({ error: 'Invalid search query' });
   }
 
-  // Simple mock search
   const results = users.filter(u =>
     u.name.toLowerCase().includes(query.toLowerCase())
   );
   res.json({ query, results, count: results.length });
 });
-
-// ---- Feature Flag Endpoints ----
 
 app.post('/features/enable/:feature', (req, res) => {
   const feature = req.params.feature;
@@ -197,7 +157,6 @@ app.post('/features/disable/:feature', (req, res) => {
   }
   features[feature] = false;
 
-  // Clean up side effects
   if (feature === 'requestLogging') {
     requestLog.length = 0;
     if (global.gc) global.gc();
@@ -215,14 +174,10 @@ app.get('/features', (req, res) => {
   });
 });
 
-// ---- Prometheus metrics endpoint ----
-
 app.get('/metrics', async (req, res) => {
   res.set('Content-Type', promClient.register.contentType);
   res.end(await promClient.register.metrics());
 });
-
-// ---- Start ----
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
