@@ -199,6 +199,8 @@ def git_commit_and_push(
     branch_name: Annotated[str, Field(description="Branch name to push")],
 ) -> str:
     """Stage all changes, commit, and push to origin."""
+    # Ensure we're on the correct branch before committing
+    _run(["git", "checkout", branch_name])
     _run(["git", "add", "-A"])
     commit_result = _run(["git", "commit", "-m", message])
     push_result = _run(["git", "push", "-u", "origin", branch_name])

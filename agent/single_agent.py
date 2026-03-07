@@ -10,7 +10,8 @@ import asyncio
 import os
 from pathlib import Path
 
-from agent_framework.anthropic import AnthropicClient
+from azure.identity import AzureCliCredential
+from agent_framework.azure import AzureOpenAIResponsesClient
 
 from tools import (
     kubectl_get,
@@ -50,11 +51,18 @@ ALL_TOOLS = [
     create_pull_request,
 ]
 
+# Azure OpenAI config
+AZURE_ENDPOINT = os.environ.get("AZURE_AI_PROJECT_ENDPOINT", "https://mvucinic-test.cognitiveservices.azure.com/")
+AZURE_DEPLOYMENT = os.environ.get("AZURE_OPENAI_RESPONSES_DEPLOYMENT_NAME", "gpt-53")
+
 
 def create_agent():
     """Create the incident response agent."""
-    client = AnthropicClient(
-        model_id=os.environ.get("ANTHROPIC_CHAT_MODEL_ID", "claude-opus-4-6"),
+    credential = AzureCliCredential()
+    client = AzureOpenAIResponsesClient(
+        project_endpoint=AZURE_ENDPOINT,
+        deployment_name=AZURE_DEPLOYMENT,
+        credential=credential,
     )
 
     agent = client.as_agent(
