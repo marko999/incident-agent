@@ -2,9 +2,12 @@ const fs = require('fs');
 const path = require('path');
 const express = require('express');
 const promClient = require('prom-client');
+const Redis = require('ioredis');
 
 const app = express();
 app.use(express.json());
+
+const REDIS_URL = process.env.REDIS_URL || 'redis://redis.demo-app.svc.cluster.local:6379';
 
 const httpRequests = new promClient.Counter({
   name: 'http_requests_total',
@@ -26,6 +29,8 @@ const features = {
   searchEnabled: false,
   userEnrichment: false,
   configDriven: false,
+  dbCache: false,
+  dbSessions: false,
 };
 
 const requestLog = [];
@@ -76,6 +81,77 @@ function getResponseConfig() {
   return JSON.parse(raw);
 }
 
+async function safeRedisClient() {
+  const client = new Redis(REDIS_URL, { connectTimeout: 1000, maxRetriesPerRequest: 1 });
+  client.on('error', () => {});
+  return client;
+}
+
+async function getCachedData(key) {
+  let client;
+  try {
+    client = await safeRedisClient();
+    const cached = await client.get(key);
+    await client.quit();
+    if (cached) return JSON.parse(cached);
+    return null;
+  } catch (err) {
+    if (client) client.disconnect();
+    console.error(`[WARN] Redis get failed: ${err.message}`);
+    return null;
+  }
+}
+
+async function setCachedData(key, data, ttl) {
+  let client;
+  try {
+    client = await safeRedisClient();
+    await client.set(key, JSON.stringify(data), 'EX', ttl);
+    await client.quit();
+  } catch (err) {
+    if (client) client.disconnect();
+    console.error(`[WARN] Redis set failed: ${err.message}`);
+  }
+}
+
+async function getActiveSessions() {
+  let client;
+  try {
+    client = await safeRedisClient();
+    const keys = await client.keys('session:*');
+    const sessions = [];
+    for (const key of keys) {
+      const data = await client.get(key);
+      if (data) sessions.push(JSON.parse(data));
+    }
+    await client.quit();
+    return sessions;
+  } catch (err) {
+    if (client) client.disconnect();
+    console.error(`[WARN] Redis sessions failed: ${err.message}`);
+    return [];
+  }
+}
+
+async function createSession(userId) {
+  let client;
+  try {
+    client = await safeRedisClient();
+    const sessionId = `session:${userId}:${Date.now()}`;
+    await client.set(sessionId, JSON.stringify({
+      userId,
+      createdAt: new Date().toISOString(),
+      lastActive: new Date().toISOString(),
+    }), 'EX', 3600);
+    await client.quit();
+    return sessionId;
+  } catch (err) {
+    if (client) client.disconnect();
+    console.error(`[WARN] Redis create session failed: ${err.message}`);
+    throw err;
+  }
+}
+
 app.use((req, res, next) => {
   if (req.path === '/metrics') return next();
 
@@ -94,16 +170,32 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', uptime: process.uptime() });
 });
 
-app.get('/api/data', (req, res) => {
-  const config = getResponseConfig();
-  const count = config?.itemCount || 100;
+app.get('/api/data', async (req, res) => {
+  try {
+    if (features.dbCache) {
+      const cached = await getCachedData('api:data');
+      if (cached) return res.json(cached);
+    }
 
-  const items = Array.from({ length: count }, (_, i) => ({
-    id: i,
-    name: `Item ${i}`,
-    value: Math.random(),
-  }));
-  res.json({ items, count: items.length });
+    const config = getResponseConfig();
+    const count = config?.itemCount || 100;
+
+    const items = Array.from({ length: count }, (_, i) => ({
+      id: i,
+      name: `Item ${i}`,
+      value: Math.random(),
+    }));
+    const result = { items, count: items.length };
+
+    if (features.dbCache) {
+      await setCachedData('api:data', result, 30);
+    }
+
+    res.json(result);
+  } catch (err) {
+    console.error(`[ERROR] /api/data failed: ${err.message}`);
+    res.status(500).json({ error: 'Internal server error', message: err.message });
+  }
 });
 
 app.get('/api/users', (req, res) => {
@@ -138,6 +230,35 @@ app.get('/api/search', (req, res) => {
     u.name.toLowerCase().includes(query.toLowerCase())
   );
   res.json({ query, results, count: results.length });
+});
+
+app.get('/api/sessions', async (req, res) => {
+  if (!features.dbSessions) {
+    return res.status(404).json({ error: 'Sessions feature is not enabled' });
+  }
+
+  try {
+    const sessions = await getActiveSessions();
+    res.json({ sessions, count: sessions.length });
+  } catch (err) {
+    console.error(`[ERROR] /api/sessions failed: ${err.message}`);
+    res.status(500).json({ error: 'Internal server error', message: err.message });
+  }
+});
+
+app.post('/api/sessions', async (req, res) => {
+  if (!features.dbSessions) {
+    return res.status(404).json({ error: 'Sessions feature is not enabled' });
+  }
+
+  try {
+    const userId = req.body?.userId || Math.floor(Math.random() * 10000);
+    const sessionId = await createSession(userId);
+    res.json({ sessionId, userId });
+  } catch (err) {
+    console.error(`[ERROR] POST /api/sessions failed: ${err.message}`);
+    res.status(500).json({ error: 'Internal server error', message: err.message });
+  }
 });
 
 app.post('/features/enable/:feature', (req, res) => {
