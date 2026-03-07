@@ -74,11 +74,17 @@ function enrichUser(user) {
   };
 }
 
+let cachedResponseConfig = null;
+
 function getResponseConfig() {
   if (!features.configDriven) return null;
+
+  if (cachedResponseConfig) return cachedResponseConfig;
+
   const configPath = path.join(__dirname, 'response-config.json');
   const raw = fs.readFileSync(configPath, 'utf-8');
-  return JSON.parse(raw);
+  cachedResponseConfig = JSON.parse(raw);
+  return cachedResponseConfig;
 }
 
 async function getCachedData(key) {
