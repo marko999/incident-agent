@@ -48,6 +48,7 @@ function logRequest(req) {
 }
 
 function validateSearchQuery(query) {
+  if (!query) return true;
   const pattern = /^([a-zA-Z0-9]+\s?)+$/;
   return pattern.test(query);
 }
