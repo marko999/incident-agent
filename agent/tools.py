@@ -1,18 +1,14 @@
 """
 Tools for the incident response agent.
 
-These are the functions the agent can call. Each @tool-decorated function becomes
-a callable tool that the LLM can invoke by name with typed parameters. The agent
-framework handles the plumbing: presenting the tool schema to the LLM, parsing
-the LLM's tool call, executing the function, returning the result.
+Each @tool-decorated function becomes a callable tool that the LLM can invoke
+by name with typed parameters.
 
-Three groups:
-  1. Cluster tools — kubectl operations for investigating the incident
-  2. Code tools — read/write files in the repo for finding and fixing bugs
-  3. GitHub tools — branch, commit, push, PR for delivering the fix
+The agent works on its own git clone in /tmp — never touches your working directory.
 """
 
 import os
+import shutil
 import subprocess
 from typing import Annotated
 
@@ -20,24 +16,43 @@ from agent_framework import tool
 from pydantic import Field
 
 
-# ---------------------------------------------------------------------------
-# Config — these come from environment, set in config.env or shell
-# ---------------------------------------------------------------------------
-
 KUBECONFIG = os.environ.get("KUBECONFIG", os.path.expanduser("~/.kube/aks-incident-demo.config"))
-REPO_DIR = os.environ.get("REPO_DIR", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 GITHUB_REPO = os.environ.get("GITHUB_REPO", "marko999/incident-agent")
+WORKDIR = os.environ.get("AGENT_WORKDIR", "/tmp/incident-agent-workdir")
+
+_workdir_ready = False
+
+
+def _ensure_workdir() -> str:
+    """Clone the repo to a fresh temp directory on first use."""
+    global _workdir_ready
+    if _workdir_ready and os.path.isdir(os.path.join(WORKDIR, ".git")):
+        return WORKDIR
+
+    if os.path.exists(WORKDIR):
+        shutil.rmtree(WORKDIR)
+
+    result = subprocess.run(
+        ["gh", "repo", "clone", GITHUB_REPO, WORKDIR],
+        capture_output=True, text=True, timeout=60,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"Failed to clone repo: {result.stderr}")
+
+    _workdir_ready = True
+    return WORKDIR
 
 
 def _run(cmd: list[str], timeout: int = 30) -> str:
-    """Run a subprocess and return stdout. Shared helper, not a tool itself."""
+    """Run a subprocess in the agent's working directory."""
+    workdir = _ensure_workdir()
     try:
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
             timeout=timeout,
-            cwd=REPO_DIR,
+            cwd=workdir,
         )
         output = result.stdout
         if result.returncode != 0:
@@ -51,12 +66,25 @@ def _run(cmd: list[str], timeout: int = 30) -> str:
 
 
 def _kubectl(args: list[str], timeout: int = 30) -> str:
-    """Run kubectl with the correct kubeconfig."""
-    return _run(["kubectl", "--kubeconfig", KUBECONFIG] + args, timeout=timeout)
+    """Run kubectl with the correct kubeconfig. Does not need the workdir."""
+    try:
+        result = subprocess.run(
+            ["kubectl", "--kubeconfig", KUBECONFIG] + args,
+            capture_output=True, text=True, timeout=timeout,
+        )
+        output = result.stdout
+        if result.returncode != 0:
+            output += f"\nSTDERR:\n{result.stderr}" if result.stderr else ""
+            output += f"\n(exit code {result.returncode})"
+        return output.strip() or "(no output)"
+    except subprocess.TimeoutExpired:
+        return f"(command timed out after {timeout}s)"
+    except Exception as e:
+        return f"(error running command: {e})"
 
 
 # ===========================================================================
-# 1. CLUSTER TOOLS — investigate the incident via kubectl
+# 1. CLUSTER TOOLS
 # ===========================================================================
 
 @tool(approval_mode="never_require")
@@ -112,7 +140,7 @@ def kubectl_events(
 
 
 # ===========================================================================
-# 2. CODE TOOLS — read and modify source code and manifests
+# 2. CODE TOOLS
 # ===========================================================================
 
 @tool(approval_mode="never_require")
@@ -120,15 +148,15 @@ def list_files(
     directory: Annotated[str, Field(description="Directory path relative to repo root, e.g. 'demo-app' or 'monitoring'")] = ".",
 ) -> str:
     """List files in a directory. Use this to explore the repo structure."""
-    target = os.path.join(REPO_DIR, directory)
+    workdir = _ensure_workdir()
+    target = os.path.join(workdir, directory)
     if not os.path.isdir(target):
         return f"Directory not found: {directory}"
     try:
         entries = []
         for root, dirs, files in os.walk(target):
-            # Skip hidden dirs and node_modules
             dirs[:] = [d for d in dirs if not d.startswith('.') and d not in ('node_modules', '__pycache__', '.venv')]
-            rel = os.path.relpath(root, REPO_DIR)
+            rel = os.path.relpath(root, workdir)
             for f in files:
                 entries.append(os.path.join(rel, f))
         return "\n".join(sorted(entries))
@@ -141,13 +169,13 @@ def read_file(
     path: Annotated[str, Field(description="File path relative to repo root, e.g. 'demo-app/server.js'")],
 ) -> str:
     """Read the contents of a file. Use this to examine source code, manifests, configs."""
-    full_path = os.path.join(REPO_DIR, path)
+    workdir = _ensure_workdir()
+    full_path = os.path.join(workdir, path)
     if not os.path.isfile(full_path):
         return f"File not found: {path}"
     try:
         with open(full_path, "r") as f:
             content = f.read()
-        # Add line numbers for easy reference
         lines = content.split("\n")
         numbered = [f"{i+1:4d} | {line}" for i, line in enumerate(lines)]
         return "\n".join(numbered)
@@ -161,7 +189,8 @@ def write_file(
     content: Annotated[str, Field(description="The full file content to write")],
 ) -> str:
     """Write content to a file. This overwrites the entire file. Use read_file first to see current content."""
-    full_path = os.path.join(REPO_DIR, path)
+    workdir = _ensure_workdir()
+    full_path = os.path.join(workdir, path)
     try:
         os.makedirs(os.path.dirname(full_path), exist_ok=True)
         with open(full_path, "w") as f:
@@ -172,7 +201,7 @@ def write_file(
 
 
 # ===========================================================================
-# 3. GITHUB TOOLS — deliver the fix as a pull request
+# 3. GITHUB TOOLS
 # ===========================================================================
 
 @tool(approval_mode="never_require")
@@ -180,7 +209,6 @@ def git_create_branch(
     branch_name: Annotated[str, Field(description="Branch name, e.g. 'fix/high-error-rate-20260307'")],
 ) -> str:
     """Create a new git branch from main and switch to it."""
-    # Make sure we're on main and up to date
     _run(["git", "checkout", "main"])
     _run(["git", "pull", "origin", "main"])
     result = _run(["git", "checkout", "-b", branch_name])
@@ -199,7 +227,6 @@ def git_commit_and_push(
     branch_name: Annotated[str, Field(description="Branch name to push")],
 ) -> str:
     """Stage all changes, commit, and push to origin."""
-    # Ensure we're on the correct branch before committing
     _run(["git", "checkout", branch_name])
     _run(["git", "add", "-A"])
     commit_result = _run(["git", "commit", "-m", message])

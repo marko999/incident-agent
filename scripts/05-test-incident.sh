@@ -9,102 +9,123 @@ KUBECTL="kubectl --kubeconfig $HOME/.kube/aks-incident-demo.config"
 case "${1:-menu}" in
 
   # ==================================================================
-  # CODE SCENARIOS — enable a buggy feature, then generate traffic
+  # CODE SCENARIOS
   # ==================================================================
 
   memory-leak)
-    # Bug: requestLog array grows without bound, no eviction
-    echo "Enabling request logging feature (has memory leak bug)..."
+    echo "Enabling request logging feature..."
     curl -s -X POST "$APP_URL/features/enable/requestLogging" | jq .
     echo ""
-    echo "Generating sustained traffic to grow the request log..."
+    echo "Generating sustained traffic..."
     for i in $(seq 1 500); do
       curl -s -o /dev/null "$APP_URL/api/data" &
-      # Throttle to avoid overwhelming the connection pool
       [ $((i % 50)) -eq 0 ] && wait
     done
     wait
-    echo ""
-    echo "Traffic sent. Memory is growing. Alert should fire in ~30-60s (HighMemoryUsage)"
-    echo "Watch with: curl -s $APP_URL/features | jq .memoryUsage"
+    echo "Alert should fire in ~30-60s (HighMemoryUsage)"
     ;;
 
   cpu-spike)
-    # Bug: catastrophic regex backtracking in search validation
-    echo "Enabling search feature (has regex backtracking bug)..."
+    echo "Enabling search feature..."
     curl -s -X POST "$APP_URL/features/enable/searchEnabled" | jq .
     echo ""
     echo "Sending pathological search queries..."
-    # This input causes catastrophic backtracking: many 'a's followed by '!'
     EVIL_QUERY="aaaaaaaaaaaaaaaaaaaaaaaaaaaa!"
     for i in $(seq 1 20); do
       curl -s -o /dev/null "$APP_URL/api/search?q=$EVIL_QUERY" &
     done
     wait
-    echo ""
-    echo "CPU is burning on regex backtracking. Alert should fire in ~30s (HighCPUUsage)"
+    echo "Alert should fire in ~30s (HighCPUUsage)"
     ;;
 
   error-rate)
-    # Bug: enrichUser crashes with TypeError on unknown user IDs (no null check)
-    echo "Enabling user enrichment feature (has null reference bug)..."
+    echo "Enabling user enrichment feature..."
     curl -s -X POST "$APP_URL/features/enable/userEnrichment" | jq .
     echo ""
     echo "Sending requests for non-existent user IDs..."
     for i in $(seq 1 200); do
-      # User IDs 99, 100, etc. don't exist in the profiles map
       curl -s -o /dev/null "$APP_URL/api/users?id=$((i + 98))" &
       [ $((i % 50)) -eq 0 ] && wait
     done
     wait
-    echo ""
-    echo "Errors generated. Alert should fire in ~30s (HighErrorRate)"
+    echo "Alert should fire in ~30s (HighErrorRate)"
     ;;
 
   slow-responses)
-    # Bug: fs.readFileSync on every request blocks the event loop
-    echo "Enabling config-driven responses (has sync I/O bug)..."
+    echo "Enabling config-driven responses..."
     curl -s -X POST "$APP_URL/features/enable/configDriven" | jq .
     echo ""
-    echo "Sending concurrent requests to saturate the event loop..."
+    echo "Sending concurrent requests..."
     for i in $(seq 1 50); do
       curl -s -o /dev/null "$APP_URL/api/data" &
     done
     wait
+    echo "Alert should fire in ~30s (HighLatency)"
+    ;;
+
+  db-conn-leak)
+    echo "Enabling database cache feature..."
+    curl -s -X POST "$APP_URL/features/enable/dbCache" | jq .
     echo ""
-    echo "Event loop is blocked by sync reads. Alert should fire in ~30s (HighLatency)"
+    echo "Sending sustained traffic to exhaust Redis connections..."
+    for i in $(seq 1 200); do
+      curl -s -o /dev/null "$APP_URL/api/data" &
+      [ $((i % 50)) -eq 0 ] && wait
+    done
+    wait
+    echo "Redis connections exhausted. Alert should fire in ~30s (HighErrorRate)"
+    ;;
+
+  db-slow-query)
+    echo "Enabling database sessions feature..."
+    curl -s -X POST "$APP_URL/features/enable/dbSessions" | jq .
+    echo ""
+    echo "Seeding Redis with many session keys..."
+    for i in $(seq 1 5000); do
+      curl -s -o /dev/null -X POST "$APP_URL/api/sessions" -H 'Content-Type: application/json' -d "{\"userId\": $i}" &
+      [ $((i % 100)) -eq 0 ] && wait
+    done
+    wait
+    echo ""
+    echo "Now querying all sessions (triggers KEYS * scan)..."
+    for i in $(seq 1 20); do
+      curl -s -o /dev/null "$APP_URL/api/sessions" &
+    done
+    wait
+    echo "Alert should fire in ~30s (HighLatency)"
     ;;
 
   # ==================================================================
-  # INFRA SCENARIOS — apply misconfigurations via kubectl
+  # INFRA SCENARIOS
   # ==================================================================
 
   scale-down)
-    # Bug: replica count too low for the service's availability requirements
     echo "Scaling demo-app down to 1 replica..."
     $KUBECTL scale deployment demo-app -n demo-app --replicas=1
-    echo ""
     echo "Alert should fire in ~30s (PodReplicaCountLow)"
-    echo "Watch: $KUBECTL get pods -n demo-app -w"
     ;;
 
   resource-squeeze)
-    # Bug: memory limit in deployment too low for the workload
-    echo "Patching memory limit to 100Mi (too low for traffic)..."
+    echo "Patching memory limit to 100Mi..."
     $KUBECTL patch deployment demo-app -n demo-app --type=json \
       -p='[{"op":"replace","path":"/spec/template/spec/containers/0/resources/limits/memory","value":"100Mi"}]'
-    echo ""
-    echo "Pods will OOM under normal load. Alert should fire in ~60s (ContainerOOMKilled)"
-    echo "Watch: $KUBECTL get pods -n demo-app -w"
+    echo "Alert should fire in ~60s (ContainerOOMKilled)"
     ;;
 
   crash-loop)
-    # Bug: bad NODE_OPTIONS env var causes the process to crash on startup
-    echo "Injecting bad NODE_OPTIONS (10MB heap = instant crash)..."
+    echo "Injecting bad NODE_OPTIONS (10MB heap)..."
     $KUBECTL set env deployment/demo-app -n demo-app NODE_OPTIONS="--max-old-space-size=10"
+    echo "Alert should fire in ~60s (PodCrashLooping)"
+    ;;
+
+  db-down)
+    echo "Scaling Redis to 0 replicas..."
+    $KUBECTL scale deployment redis -n demo-app --replicas=0
     echo ""
-    echo "Pods will crash loop. Alert should fire in ~60s (PodCrashLooping)"
-    echo "Watch: $KUBECTL get pods -n demo-app -w"
+    echo "Redis is down. Enable a db feature and send traffic to trigger errors:"
+    echo "  curl -X POST $APP_URL/features/enable/dbCache"
+    echo "  for i in \$(seq 1 50); do curl -s -o /dev/null $APP_URL/api/data & done; wait"
+    echo "Alert should fire in ~30s (HighErrorRate)"
     ;;
 
   # ==================================================================
@@ -113,14 +134,17 @@ case "${1:-menu}" in
 
   reset)
     echo "Resetting all features..."
-    curl -s -X POST "$APP_URL/features/disable/requestLogging" | jq . || echo "(app may be down)"
-    curl -s -X POST "$APP_URL/features/disable/searchEnabled" | jq . || echo "(skipped)"
-    curl -s -X POST "$APP_URL/features/disable/userEnrichment" | jq . || echo "(skipped)"
-    curl -s -X POST "$APP_URL/features/disable/configDriven" | jq . || echo "(skipped)"
+    curl -s -X POST "$APP_URL/features/disable/requestLogging" 2>/dev/null | jq . || echo "(app may be down)"
+    curl -s -X POST "$APP_URL/features/disable/searchEnabled" 2>/dev/null | jq . || echo "(skipped)"
+    curl -s -X POST "$APP_URL/features/disable/userEnrichment" 2>/dev/null | jq . || echo "(skipped)"
+    curl -s -X POST "$APP_URL/features/disable/configDriven" 2>/dev/null | jq . || echo "(skipped)"
+    curl -s -X POST "$APP_URL/features/disable/dbCache" 2>/dev/null | jq . || echo "(skipped)"
+    curl -s -X POST "$APP_URL/features/disable/dbSessions" 2>/dev/null | jq . || echo "(skipped)"
 
     echo ""
     echo "Resetting infra..."
     $KUBECTL scale deployment demo-app -n demo-app --replicas=2
+    $KUBECTL scale deployment redis -n demo-app --replicas=1 2>/dev/null || true
 
     $KUBECTL patch deployment demo-app -n demo-app --type=json \
       -p='[{"op":"replace","path":"/spec/template/spec/containers/0/resources/limits/memory","value":"512Mi"}]' \
@@ -131,6 +155,7 @@ case "${1:-menu}" in
     echo ""
     echo "Waiting for pods to stabilize..."
     $KUBECTL rollout status deployment/demo-app -n demo-app --timeout=60s
+    $KUBECTL rollout status deployment/redis -n demo-app --timeout=60s 2>/dev/null || true
     echo "Done."
     ;;
 
@@ -148,16 +173,19 @@ case "${1:-menu}" in
   *)
     echo "Usage: $0 <scenario>"
     echo ""
-    echo "Code scenarios (enable buggy feature + generate traffic):"
-    echo "  memory-leak      - Unbounded request log         → HighMemoryUsage"
-    echo "  cpu-spike        - Catastrophic regex backtrack   → HighCPUUsage"
-    echo "  error-rate       - Null ref on unknown user ID    → HighErrorRate"
-    echo "  slow-responses   - Sync file read on every req    → HighLatency"
+    echo "Code scenarios:"
+    echo "  memory-leak      - Unbounded request log          → HighMemoryUsage"
+    echo "  cpu-spike        - Catastrophic regex backtrack    → HighCPUUsage"
+    echo "  error-rate       - Null ref on unknown user ID     → HighErrorRate"
+    echo "  slow-responses   - Sync file read on every req     → HighLatency"
+    echo "  db-conn-leak     - New Redis conn per request      → HighErrorRate"
+    echo "  db-slow-query    - KEYS * scan blocks Redis        → HighLatency"
     echo ""
-    echo "Infra scenarios (apply misconfiguration via kubectl):"
-    echo "  scale-down       - Set replicas to 1              → PodReplicaCountLow"
-    echo "  resource-squeeze - Set memory limit to 100Mi      → ContainerOOMKilled"
-    echo "  crash-loop       - Bad NODE_OPTIONS (10MB heap)   → PodCrashLooping"
+    echo "Infra scenarios:"
+    echo "  scale-down       - Set replicas to 1               → PodReplicaCountLow"
+    echo "  resource-squeeze - Set memory limit to 100Mi       → ContainerOOMKilled"
+    echo "  crash-loop       - Bad NODE_OPTIONS (10MB heap)    → PodCrashLooping"
+    echo "  db-down          - Scale Redis to 0                → HighErrorRate"
     echo ""
     echo "  reset            - Undo all features + infra"
     echo "  status           - Show current state"
