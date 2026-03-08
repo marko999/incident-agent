@@ -27,4 +27,11 @@ COPY *.py *.md ./
 
 ENV PYTHONUNBUFFERED=1
 
-ENTRYPOINT ["python", "run.py"]
+# Configure git identity
+RUN git config --global user.email "incident-agent@automated.bot" && \
+    git config --global user.name "Incident Agent"
+
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]
