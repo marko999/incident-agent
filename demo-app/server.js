@@ -31,6 +31,7 @@ const features = {
   configDriven: false,
   dbCache: false,
   dbSessions: false,
+  asyncProcessing: false,
 };
 
 const requestLog = [];
@@ -136,6 +137,12 @@ app.get('/health', (req, res) => {
 });
 
 app.get('/api/data', async (req, res) => {
+  if (features.asyncProcessing) {
+    const payload = req.query.payload;
+    const parsed = JSON.parse(payload);
+    setImmediate(() => parsed.transform());
+  }
+
   try {
     if (features.dbCache) {
       const cached = await getCachedData('api:data');

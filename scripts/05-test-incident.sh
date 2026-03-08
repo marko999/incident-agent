@@ -95,6 +95,19 @@ case "${1:-menu}" in
     echo "Alert should fire in ~30s (HighLatency)"
     ;;
 
+  process-crash)
+    echo "Enabling async processing feature..."
+    curl -s -X POST "$APP_URL/features/enable/asyncProcessing" | jq .
+    echo ""
+    echo "Sending requests to crash the process..."
+    for i in $(seq 1 10); do
+      curl -s -o /dev/null "$APP_URL/api/data" &
+      sleep 3
+    done
+    wait
+    echo "Alert should fire in ~30s (PodCrashLooping)"
+    ;;
+
   # ==================================================================
   # INFRA SCENARIOS
   # ==================================================================
@@ -140,6 +153,7 @@ case "${1:-menu}" in
     curl -s -X POST "$APP_URL/features/disable/configDriven" 2>/dev/null | jq . || echo "(skipped)"
     curl -s -X POST "$APP_URL/features/disable/dbCache" 2>/dev/null | jq . || echo "(skipped)"
     curl -s -X POST "$APP_URL/features/disable/dbSessions" 2>/dev/null | jq . || echo "(skipped)"
+    curl -s -X POST "$APP_URL/features/disable/asyncProcessing" 2>/dev/null | jq . || echo "(skipped)"
 
     echo ""
     echo "Resetting infra..."
@@ -180,6 +194,7 @@ case "${1:-menu}" in
     echo "  slow-responses   - Sync file read on every req     → HighLatency"
     echo "  db-conn-leak     - New Redis conn per request      → HighErrorRate"
     echo "  db-slow-query    - KEYS * scan blocks Redis        → HighLatency"
+    echo "  process-crash    - Unhandled async exception        → PodCrashLooping"
     echo ""
     echo "Infra scenarios:"
     echo "  scale-down       - Set replicas to 1               → PodReplicaCountLow"
