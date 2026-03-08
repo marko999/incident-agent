@@ -16,7 +16,7 @@ from agent_framework import tool
 from pydantic import Field
 
 
-KUBECONFIG = os.environ.get("KUBECONFIG", os.path.expanduser("~/.kube/aks-incident-demo.config"))
+KUBECONFIG = os.environ.get("KUBECONFIG", "")
 GITHUB_REPO = os.environ.get("GITHUB_REPO", "marko999/incident-agent")
 WORKDIR = os.environ.get("AGENT_WORKDIR", "/tmp/incident-agent-workdir")
 
@@ -68,8 +68,11 @@ def _run(cmd: list[str], timeout: int = 30) -> str:
 def _kubectl(args: list[str], timeout: int = 30) -> str:
     """Run kubectl with the correct kubeconfig. Does not need the workdir."""
     try:
+        cmd = ["kubectl"]
+        if KUBECONFIG:
+            cmd += ["--kubeconfig", KUBECONFIG]
         result = subprocess.run(
-            ["kubectl", "--kubeconfig", KUBECONFIG] + args,
+            cmd + args,
             capture_output=True, text=True, timeout=timeout,
         )
         output = result.stdout

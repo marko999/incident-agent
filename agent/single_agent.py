@@ -10,7 +10,7 @@ import asyncio
 import os
 from pathlib import Path
 
-from azure.identity import AzureCliCredential
+from azure.identity import DefaultAzureCredential
 from agent_framework.azure import AzureOpenAIResponsesClient
 
 from tools import (
@@ -58,7 +58,7 @@ AZURE_DEPLOYMENT = os.environ.get("AZURE_OPENAI_RESPONSES_DEPLOYMENT_NAME", "gpt
 
 def create_agent():
     """Create the incident response agent."""
-    credential = AzureCliCredential()
+    credential = DefaultAzureCredential()
     client = AzureOpenAIResponsesClient(
         project_endpoint=AZURE_ENDPOINT,
         deployment_name=AZURE_DEPLOYMENT,

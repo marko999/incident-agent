@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: incident-agent
+  namespace: demo-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: incident-agent
+  template:
+    metadata:
+      labels:
+        app: incident-agent
+        azure.workload.identity/use: "true"
+    spec:
+      serviceAccountName: incident-agent
+      containers:
+        - name: agent
+          image: acraksincidentdemo9968.azurecr.io/incident-agent:latest
+          args: ["--poll", "30", "--webhook-url", "http://agent-webhook.demo-app.svc.cluster.local:8080"]
+          env:
+            - name: AZURE_AI_PROJECT_ENDPOINT
+              value: "https://mvucinic-test.cognitiveservices.azure.com/"
+            - name: AZURE_OPENAI_RESPONSES_DEPLOYMENT_NAME
+              value: "gpt-53"
+            - name: GITHUB_REPO
+              value: "marko999/incident-agent"
+            - name: GH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: incident-agent-secrets
+                  key: gh-token
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      restartPolicy: Always

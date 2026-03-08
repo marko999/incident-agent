@@ -48,8 +48,16 @@ def filter_demo_app_alerts(alerts: list[dict]) -> list[dict]:
     """Filter to only demo-app alerts, ignoring AKS system noise."""
     # These are AKS managed components — always firing, not our concern
     ignore = {"KubeSchedulerDown", "KubeControllerManagerDown", "KubeProxyDown",
-              "Watchdog", "InfoInhibitor"}
-    return [a for a in alerts if a.get("alertname") not in ignore]
+              "Watchdog", "InfoInhibitor", "KubeClientErrors", "KubeAPIDown",
+              "KubeAPITerminatedRequests", "etcdHighNumberOfLeaderChanges"}
+    # Only process alerts with service=demo-app, ignore system alerts
+    result = []
+    for a in alerts:
+        if a.get("alertname") in ignore:
+            continue
+        if a.get("service") == "demo-app" or a.get("namespace") == "demo-app":
+            result.append(a)
+    return result
 
 
 def make_test_alert(alertname: str) -> dict:
