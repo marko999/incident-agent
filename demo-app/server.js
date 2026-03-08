@@ -82,8 +82,14 @@ app.get('/health', (req, res) => {
 app.get('/api/data', async (req, res) => {
   if (features.asyncProcessing) {
     const payload = req.query.payload;
-    const parsed = JSON.parse(payload);
-    setImmediate(() => parsed.transform());
+    if (payload) {
+      try {
+        const parsed = JSON.parse(payload);
+        setImmediate(() => parsed.transform && parsed.transform());
+      } catch (e) {
+        console.error('[WARN] Invalid async payload');
+      }
+    }
   }
 
   try {
