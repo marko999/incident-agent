@@ -1,5 +1,3 @@
-const fs = require('fs');
-const path = require('path');
 const express = require('express');
 const promClient = require('prom-client');
 const Redis = require('ioredis');
@@ -25,33 +23,10 @@ const httpDuration = new promClient.Histogram({
 promClient.collectDefaultMetrics();
 
 const features = {
-  requestLogging: false,
-  searchEnabled: false,
   userEnrichment: false,
-  configDriven: false,
   dbCache: false,
-  dbSessions: false,
   asyncProcessing: false,
 };
-
-const requestLog = [];
-
-function logRequest(req) {
-  if (!features.requestLogging) return;
-  requestLog.push({
-    timestamp: new Date().toISOString(),
-    method: req.method,
-    path: req.path,
-    headers: { ...req.headers },
-    query: { ...req.query },
-    body: req.body,
-  });
-}
-
-function validateSearchQuery(query) {
-  const pattern = /^([a-zA-Z0-9]+\s?)+$/;
-  return pattern.test(query);
-}
 
 const userProfiles = {
   1: { bio: 'Loves hiking', avatar: '/img/alice.png', settings: { theme: 'dark' } },
@@ -75,13 +50,6 @@ function enrichUser(user) {
   };
 }
 
-function getResponseConfig() {
-  if (!features.configDriven) return null;
-  const configPath = path.join(__dirname, 'response-config.json');
-  const raw = fs.readFileSync(configPath, 'utf-8');
-  return JSON.parse(raw);
-}
-
 async function getCachedData(key) {
   const client = new Redis(REDIS_URL);
   const cached = await client.get(key);
@@ -94,35 +62,10 @@ async function setCachedData(key, data, ttl) {
   await client.set(key, JSON.stringify(data), 'EX', ttl);
 }
 
-async function getActiveSessions() {
-  const client = new Redis(REDIS_URL);
-  const keys = await client.keys('session:*');
-  const sessions = [];
-  for (const key of keys) {
-    const data = await client.get(key);
-    if (data) sessions.push(JSON.parse(data));
-  }
-  await client.quit();
-  return sessions;
-}
-
-async function createSession(userId) {
-  const client = new Redis(REDIS_URL);
-  const sessionId = `session:${userId}:${Date.now()}`;
-  await client.set(sessionId, JSON.stringify({
-    userId,
-    createdAt: new Date().toISOString(),
-    lastActive: new Date().toISOString(),
-  }), 'EX', 3600);
-  await client.quit();
-  return sessionId;
-}
-
 app.use((req, res, next) => {
   if (req.path === '/metrics') return next();
 
   const start = Date.now();
-  logRequest(req);
 
   res.on('finish', () => {
     const duration = (Date.now() - start) / 1000;
@@ -149,8 +92,7 @@ app.get('/api/data', async (req, res) => {
       if (cached) return res.json(cached);
     }
 
-    const config = getResponseConfig();
-    const count = config?.itemCount || 100;
+    const count = 100;
 
     const items = Array.from({ length: count }, (_, i) => ({
       id: i,
@@ -187,52 +129,6 @@ app.get('/api/users', (req, res) => {
   res.json({ users });
 });
 
-app.get('/api/search', (req, res) => {
-  if (!features.searchEnabled) {
-    return res.status(404).json({ error: 'Search is not enabled' });
-  }
-
-  const query = req.query.q || '';
-
-  if (!validateSearchQuery(query)) {
-    return res.status(400).json({ error: 'Invalid search query' });
-  }
-
-  const results = users.filter(u =>
-    u.name.toLowerCase().includes(query.toLowerCase())
-  );
-  res.json({ query, results, count: results.length });
-});
-
-app.get('/api/sessions', async (req, res) => {
-  if (!features.dbSessions) {
-    return res.status(404).json({ error: 'Sessions feature is not enabled' });
-  }
-
-  try {
-    const sessions = await getActiveSessions();
-    res.json({ sessions, count: sessions.length });
-  } catch (err) {
-    console.error(`[ERROR] /api/sessions failed: ${err.message}`);
-    res.status(500).json({ error: 'Internal server error', message: err.message });
-  }
-});
-
-app.post('/api/sessions', async (req, res) => {
-  if (!features.dbSessions) {
-    return res.status(404).json({ error: 'Sessions feature is not enabled' });
-  }
-
-  try {
-    const userId = req.body?.userId || Math.floor(Math.random() * 10000);
-    const sessionId = await createSession(userId);
-    res.json({ sessionId, userId });
-  } catch (err) {
-    console.error(`[ERROR] POST /api/sessions failed: ${err.message}`);
-    res.status(500).json({ error: 'Internal server error', message: err.message });
-  }
-});
-
 app.post('/features/enable/:feature', (req, res) => {
   const feature = req.params.feature;
   if (!(feature in features)) {
@@ -249,12 +145,6 @@ app.post('/features/disable/:feature', (req, res) => {
     return res.status(400).json({ error: `Unknown feature: ${feature}` });
   }
   features[feature] = false;
-
-  if (feature === 'requestLogging') {
-    requestLog.length = 0;
-    if (global.gc) global.gc();
-  }
-
   console.log(`[FEATURE] Disabled: ${feature}`);
   res.json({ feature, enabled: false });
 });
@@ -262,7 +152,6 @@ app.post('/features/disable/:feature', (req, res) => {
 app.get('/features', (req, res) => {
   res.json({
     features,
-    requestLogSize: requestLog.length,
     memoryUsage: process.memoryUsage(),
   });
 });

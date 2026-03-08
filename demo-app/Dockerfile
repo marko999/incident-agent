@@ -2,6 +2,6 @@ FROM node:20-alpine
 WORKDIR /app
 COPY package.json ./
 RUN npm install --production
-COPY server.js response-config.json ./
+COPY server.js ./
 EXPOSE 3000
-CMD ["node", "--expose-gc", "server.js"]
+CMD ["node", "server.js"]

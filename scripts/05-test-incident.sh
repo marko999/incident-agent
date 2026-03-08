@@ -12,32 +12,6 @@ case "${1:-menu}" in
   # CODE SCENARIOS
   # ==================================================================
 
-  memory-leak)
-    echo "Enabling request logging feature..."
-    curl -s -X POST "$APP_URL/features/enable/requestLogging" | jq .
-    echo ""
-    echo "Generating sustained traffic..."
-    for i in $(seq 1 500); do
-      curl -s -o /dev/null "$APP_URL/api/data" &
-      [ $((i % 50)) -eq 0 ] && wait
-    done
-    wait
-    echo "Alert should fire in ~30-60s (HighMemoryUsage)"
-    ;;
-
-  cpu-spike)
-    echo "Enabling search feature..."
-    curl -s -X POST "$APP_URL/features/enable/searchEnabled" | jq .
-    echo ""
-    echo "Sending pathological search queries..."
-    EVIL_QUERY="aaaaaaaaaaaaaaaaaaaaaaaaaaaa!"
-    for i in $(seq 1 20); do
-      curl -s -o /dev/null "$APP_URL/api/search?q=$EVIL_QUERY" &
-    done
-    wait
-    echo "Alert should fire in ~30s (HighCPUUsage)"
-    ;;
-
   error-rate)
     echo "Enabling user enrichment feature..."
     curl -s -X POST "$APP_URL/features/enable/userEnrichment" | jq .
@@ -51,18 +25,6 @@ case "${1:-menu}" in
     echo "Alert should fire in ~30s (HighErrorRate)"
     ;;
 
-  slow-responses)
-    echo "Enabling config-driven responses..."
-    curl -s -X POST "$APP_URL/features/enable/configDriven" | jq .
-    echo ""
-    echo "Sending concurrent requests..."
-    for i in $(seq 1 50); do
-      curl -s -o /dev/null "$APP_URL/api/data" &
-    done
-    wait
-    echo "Alert should fire in ~30s (HighLatency)"
-    ;;
-
   db-conn-leak)
     echo "Enabling database cache feature..."
     curl -s -X POST "$APP_URL/features/enable/dbCache" | jq .
@@ -74,25 +36,6 @@ case "${1:-menu}" in
     done
     wait
     echo "Redis connections exhausted. Alert should fire in ~30s (HighErrorRate)"
-    ;;
-
-  db-slow-query)
-    echo "Enabling database sessions feature..."
-    curl -s -X POST "$APP_URL/features/enable/dbSessions" | jq .
-    echo ""
-    echo "Seeding Redis with many session keys..."
-    for i in $(seq 1 5000); do
-      curl -s -o /dev/null -X POST "$APP_URL/api/sessions" -H 'Content-Type: application/json' -d "{\"userId\": $i}" &
-      [ $((i % 100)) -eq 0 ] && wait
-    done
-    wait
-    echo ""
-    echo "Now querying all sessions (triggers KEYS * scan)..."
-    for i in $(seq 1 20); do
-      curl -s -o /dev/null "$APP_URL/api/sessions" &
-    done
-    wait
-    echo "Alert should fire in ~30s (HighLatency)"
     ;;
 
   process-crash)
@@ -147,12 +90,8 @@ case "${1:-menu}" in
 
   reset)
     echo "Resetting all features..."
-    curl -s -X POST "$APP_URL/features/disable/requestLogging" 2>/dev/null | jq . || echo "(app may be down)"
-    curl -s -X POST "$APP_URL/features/disable/searchEnabled" 2>/dev/null | jq . || echo "(skipped)"
-    curl -s -X POST "$APP_URL/features/disable/userEnrichment" 2>/dev/null | jq . || echo "(skipped)"
-    curl -s -X POST "$APP_URL/features/disable/configDriven" 2>/dev/null | jq . || echo "(skipped)"
+    curl -s -X POST "$APP_URL/features/disable/userEnrichment" 2>/dev/null | jq . || echo "(app may be down)"
     curl -s -X POST "$APP_URL/features/disable/dbCache" 2>/dev/null | jq . || echo "(skipped)"
-    curl -s -X POST "$APP_URL/features/disable/dbSessions" 2>/dev/null | jq . || echo "(skipped)"
     curl -s -X POST "$APP_URL/features/disable/asyncProcessing" 2>/dev/null | jq . || echo "(skipped)"
 
     echo ""
@@ -188,12 +127,8 @@ case "${1:-menu}" in
     echo "Usage: $0 <scenario>"
     echo ""
     echo "Code scenarios:"
-    echo "  memory-leak      - Unbounded request log          → HighMemoryUsage"
-    echo "  cpu-spike        - Catastrophic regex backtrack    → HighCPUUsage"
     echo "  error-rate       - Null ref on unknown user ID     → HighErrorRate"
-    echo "  slow-responses   - Sync file read on every req     → HighLatency"
     echo "  db-conn-leak     - New Redis conn per request      → HighErrorRate"
-    echo "  db-slow-query    - KEYS * scan blocks Redis        → HighLatency"
     echo "  process-crash    - Unhandled async exception        → PodCrashLooping"
     echo ""
     echo "Infra scenarios:"
