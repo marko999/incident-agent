@@ -22,6 +22,9 @@ spec:
       containers:
         - name: demo-app
           image: IMAGE_PLACEHOLDER
+          env:
+            - name: NODE_OPTIONS
+              value: "--max-old-space-size=192"
           ports:
             - containerPort: 3000
           resources:
@@ -30,7 +33,7 @@ spec:
               memory: 128Mi
             limits:
               cpu: 500m
-              memory: 256Mi
+              memory: 512Mi
           readinessProbe:
             httpGet:
               path: /health
