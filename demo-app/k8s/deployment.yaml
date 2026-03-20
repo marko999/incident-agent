@@ -24,6 +24,9 @@ spec:
           image: IMAGE_PLACEHOLDER
           ports:
             - containerPort: 3000
+          env:
+            - name: NODE_OPTIONS
+              value: "--max-old-space-size=128"
           resources:
             requests:
               cpu: 100m
