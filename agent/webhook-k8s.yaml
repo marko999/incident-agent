@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-webhook
+  namespace: demo-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: agent-webhook
+  template:
+    metadata:
+      labels:
+        app: agent-webhook
+    spec:
+      containers:
+        - name: webhook
+          image: node:20-alpine
+          command: ["node", "/app/webhook-server.js"]
+          ports:
+            - containerPort: 8080
+          env:
+            - name: AGENT_URL
+              value: ""
+          volumeMounts:
+            - name: app
+              mountPath: /app
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+      volumes:
+        - name: app
+          configMap:
+            name: agent-webhook-code
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-webhook
+  namespace: demo-app
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8080
+      targetPort: 8080
+  selector:
+    app: agent-webhook
