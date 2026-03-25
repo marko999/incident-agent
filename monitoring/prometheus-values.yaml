@@ -1,0 +1,38 @@
+grafana:
+  adminPassword: "changeme"
+  service:
+    type: ClusterIP
+
+alertmanager:
+  config:
+    global:
+      resolve_timeout: 1m
+    route:
+      receiver: "webhook"
+      group_by: ["alertname", "namespace"]
+      group_wait: 10s
+      group_interval: 30s
+      repeat_interval: 1m
+      routes:
+        - match:
+            namespace: demo-app
+          receiver: "webhook"
+          continue: true
+    receivers:
+      - name: "webhook"
+        webhook_configs:
+          - url: "http://agent-webhook.demo-app.svc.cluster.local:8080/alert"
+            send_resolved: true
+
+prometheus:
+  prometheusSpec:
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    retention: 2d
+    resources:
+      requests:
+        memory: 256Mi
+        cpu: 100m
+      limits:
+        memory: 512Mi
