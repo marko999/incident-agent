@@ -1,0 +1,43 @@
+# NOTE: Replace YOUR_* placeholders with your environment values
+# or use scripts/05-deploy-agent.sh which handles substitution automatically
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: incident-agent
+  namespace: demo-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: incident-agent
+  template:
+    metadata:
+      labels:
+        app: incident-agent
+        azure.workload.identity/use: "true"
+    spec:
+      serviceAccountName: incident-agent
+      containers:
+        - name: agent
+          image: YOUR_ACR_NAME.azurecr.io/incident-agent:latest
+          args: ["--poll", "30", "--webhook-url", "http://agent-webhook.demo-app.svc.cluster.local:8080"]
+          env:
+            - name: AZURE_AI_PROJECT_ENDPOINT
+              value: "https://YOUR_RESOURCE.cognitiveservices.azure.com/"
+            - name: AZURE_OPENAI_RESPONSES_DEPLOYMENT_NAME
+              value: "YOUR_DEPLOYMENT_NAME"
+            - name: GITHUB_REPO
+              value: "YOUR_ORG/incident-agent"
+            - name: GH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: incident-agent-secrets
+                  key: gh-token
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      restartPolicy: Always
