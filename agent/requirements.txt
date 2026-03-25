@@ -1,0 +1,4 @@
+agent-framework[azure]==1.0.0rc3
+azure-identity==1.26.0b2
+openai==2.24.0
+pydantic>=2.12
