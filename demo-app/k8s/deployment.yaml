@@ -22,6 +22,9 @@ spec:
       containers:
         - name: demo-app
           image: IMAGE_PLACEHOLDER
+          env:
+            - name: NODE_OPTIONS
+              value: "--max-old-space-size=128"
           ports:
             - containerPort: 3000
           resources:
